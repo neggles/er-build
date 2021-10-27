@@ -1,0 +1,25 @@
+# ~/.bashrc: executed by bash(1) for non-login shells.
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# LS opts
+export LS_OPTIONS='--color=auto'
+eval "`dircolors`"
+alias ls='ls $LS_OPTIONS'
+alias ll='ls $LS_OPTIONS -l'
+alias l='ls $LS_OPTIONS -lA'
+
+# export these for make purposes
+export ER_MODEL
+export ARCH
+export CROSS_COMPILE
+export KERNELDIR
+
+# add some convenient aliases
+alias er-makeconfig='make ARCH=$ARCH "ubnt_er_${ER_MODEL}_defconfig"'
+alias er-makemodule='make -j$(nproc) ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KERNELDIR=$KERNELDIR -C $KERNELDIR M=$(pwd) modules'
+alias er-make='make -j$(nproc) ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE'

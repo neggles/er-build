@@ -47,3 +47,6 @@ modules.order
 # toolchain and header dirs. i only have these locally so vscode will behave.
 cross/
 headers/
+
+# local misc
+misc/

@@ -31,6 +31,7 @@ RUN apt-get update && \
 
 ENV PATH="/opt/cross/bin:${PATH}"
 
+
 # build the actual toolchain
 FROM base AS toolchain-builder
 
@@ -57,28 +58,44 @@ RUN make -j$(nproc) all-gcc && make install-gcc
 
 
 # now make our build environment image
-FROM base AS headers-builder
-
-# what kind are we make this for?
-ARG ER_MODEL=e1000
+FROM base AS builder
 
 # env vars for build
-ENV PATH="/opt/cross/bin:${PATH}"
+ENV ER_MODEL=e1000
 ENV CROSS_COMPILE="mips64-octeon-linux-"
 ENV ARCH="mips"
+ENV KERNELDIR=/root/kernel
+
+WORKDIR /root
 
 # we grab the toolchain from toolchain-builder
 COPY --from=toolchain-builder /opt/cross /opt/cross
 
-# add in the kernel headers package
+# add and extract the kernel package
 ADD ./kernel_*.tar.* /root/
+
+# add bashrc
+COPY bash.rc /root/.bashrc
+
+# prep this for interactive use.
+# use docker-compose to pull this one out if you want a whole kernel
+CMD ["bash"]
+
+
+# now we build the header tarball
+FROM builder AS headers-builder
+
+# env vars for build
+ENV ER_MODEL=e1000
+ENV CROSS_COMPILE="mips64-octeon-linux-"
+ENV ARCH="mips"
+ENV KERNELDIR=/root/headers
 
 # go here
 WORKDIR /root/kernel
 
-# build config
-RUN mkdir -p /root/headers && \
-    make ARCH=mips "ubnt_er_${ER_MODEL}_defconfig"
+# do initial config gen
+RUN make ARCH=$ARCH "ubnt_er_${ER_MODEL}_defconfig"
 
 # do initial module prep build
 RUN make -j$(nproc) ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare
@@ -94,11 +111,14 @@ RUN rm /root/headers/source /root/headers/Makefile
 RUN find . -path './include/*' -prune -o -path './scripts/*' -prune -o -type f \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) -print | cpio -pdm "/root/headers"
 RUN cp -a scripts include "/root/headers"
 RUN find $(find arch -name include -type d -print) -type f | cpio -pdm "/root/headers"
+RUN cp ./include/config/kernel.release /root/ && printenv >> /root/environment.headers-build
 
 
-# okay now we have our headers and our toolchain, lets make our final
-FROM base
+# okay now we have our headers and our toolchain, lets make our module builder
+FROM base AS kmod-builder
 
+# env vars for build
+ENV ER_MODEL=e1000
 ENV CROSS_COMPILE="mips64-octeon-linux-"
 ENV ARCH="mips"
 ENV KERNELDIR=/root/headers
@@ -109,6 +129,9 @@ COPY --from=headers-builder /root/headers /root/headers
 
 WORKDIR /root
 
-COPY env-setup.sh ./
+# add bashrc
+COPY bash.rc /root/.bashrc
+
+# prep this for interactive use.
 
 CMD ["bash"]
