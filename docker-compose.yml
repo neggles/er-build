@@ -22,4 +22,4 @@ services:
     volumes:
       - type: bind
         source: ./
-        target: /root/src
+        target: /root/repo
