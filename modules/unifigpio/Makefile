@@ -1,6 +1,9 @@
 # obj-m specifies that this is a kernel module
 obj-m += unifigpio.o
 
+# Use these options only to determine compiler include directories.
+ccflags-y := $(ccflags-y) -xc -E -v
+
 # paths and cross-compilation info etc.
 KERNELDIR ?= /root/headers
 CROSS_COMPILE ?= mips64-octeon-linux-
