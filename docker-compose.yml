@@ -1,0 +1,25 @@
+version: '3.7'
+services:
+  kmod-builder:
+    image: neg2led/er-kmod-builder:latest
+    build:
+      context: ./docker
+      target: kmod-builder
+    stdin_open: true
+    tty: true
+    volumes:
+      - type: bind
+        source: ./modules
+        target: /root/modules
+
+  builder:
+    image: neg2led/er-kernel-builder:latest
+    build:
+      context: ./docker
+      target: builder
+    stdin_open: true
+    tty: true
+    volumes:
+      - type: bind
+        source: ./
+        target: /root/src

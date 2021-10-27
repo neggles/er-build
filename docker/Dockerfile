@@ -65,6 +65,7 @@ ENV ER_MODEL=e1000
 ENV CROSS_COMPILE="mips64-octeon-linux-"
 ENV ARCH="mips"
 ENV KERNELDIR=/root/kernel
+ENV SHELL=/bin/bash
 
 WORKDIR /root
 
@@ -113,7 +114,7 @@ RUN rm /root/headers/source /root/headers/Makefile
 RUN find . -path './include/*' -prune -o -path './scripts/*' -prune -o -type f \( -name 'Makefile*' -o -name 'Kconfig*' -o -name 'Kbuild*' -o -name '*.sh' -o -name '*.pl' -o -name '*.lds' -o -name 'Platform' \) -print | cpio -pdm "/root/headers"
 RUN cp -a scripts include "/root/headers"
 RUN find $(find arch -name include -type d -print) -type f | cpio -pdm "/root/headers"
-RUN cp ./include/config/kernel.release /root/ && printenv >> /root/environment.headers-build
+RUN cp /root/headers/include/config/kernel.release /root/ && printenv >> /root/environment.headers-build
 
 
 # okay now we have our headers and our toolchain, lets make our module builder
@@ -124,6 +125,7 @@ ENV ER_MODEL=e1000
 ENV CROSS_COMPILE="mips64-octeon-linux-"
 ENV ARCH="mips"
 ENV KERNELDIR=/root/headers
+ENV SHELL=/bin/bash
 
 # get toolchain and headers from our previous stages
 COPY --from=toolchain-builder /opt/cross /opt/cross
