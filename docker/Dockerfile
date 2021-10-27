@@ -94,6 +94,8 @@ ENV KERNELDIR=/root/headers
 # go here
 WORKDIR /root/kernel
 
+RUN mkdir -p /root/headers
+
 # do initial config gen
 RUN make ARCH=$ARCH "ubnt_er_${ER_MODEL}_defconfig"
 
