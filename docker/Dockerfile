@@ -26,6 +26,8 @@ RUN apt-get update && \
 	wget \
     nano \
 	pigz \
+	libncurses5-dev \
+	libncursesw5-dev \
 	jq && \
 	rm -rf /var/lib/apt/lists/*
 
@@ -118,7 +120,7 @@ RUN cp /root/headers/include/config/kernel.release /root/ && printenv >> /root/e
 
 
 # okay now we have our headers and our toolchain, lets make our module builder
-FROM base AS kmod-builder
+FROM base AS module-builder
 
 # env vars for build
 ENV ER_MODEL=e1000
