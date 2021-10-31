@@ -5,7 +5,7 @@
 #include <linux/printk.h> /* prints info to the kernel log */
 #include <linux/errno.h> /* error codes */
 #include <linux/proc_fs.h> /* creates a procfs dir and some procfs files */
-#include <linux/fs.h>
+#include <linux/sched.h> /* uses a scheduler */
 #include <linux/seq_file.h> /* uses seq_file operations */
 #include <linux/uaccess.h> /* copies data to/from userspace */
 #include <linux/jiffies.h> /* wants to know what time is */
@@ -158,15 +158,19 @@ static int __init unifigpio_init(void)
 	// now set up the GPIOs
 	gpio_request(gpio_led_blue, "logo-blue");
 	gpio_direction_output(gpio_led_blue, led_blue);
+	pr_debug("%s: GPIO %d (blue LED) set up", MODULE_NAME, gpio_led_blue);
 
 	gpio_request(gpio_led_white, "logo-white");
 	gpio_direction_output(gpio_led_white, led_white);
+	pr_debug("%s: GPIO %d (white LED) set up", MODULE_NAME, gpio_led_white);
 
 	gpio_request(gpio_lcm_reset, "lcm-reset");
 	gpio_direction_output(gpio_lcm_reset, lcm_reset);
+	pr_debug("%s: GPIO %d (LCM reset) set up", MODULE_NAME, gpio_lcm_reset);
 
 	gpio_request(gpio_lcm_reset, "lcm-boot");
 	gpio_direction_output(gpio_lcm_boot, lcm_boot);
+	pr_debug("%s: GPIO %d (LCM boot) set up", MODULE_NAME, gpio_lcm_boot);
 
 	pr_info("%s: init complete\n", MODULE_NAME);
 	return 0;
@@ -177,20 +181,30 @@ static void __exit unifigpio_exit(void)
 {
 	pr_info("%s: unloading...\n", MODULE_NAME);
 
+	// delete timer
+	del_timer(&led_timer);
+	pr_debug("%s: LED timer deleted\n", MODULE_NAME);
+
 	// remove procfs directory
 	remove_proc_entry(proc_led_pattern_name, proc_dir);
 	remove_proc_entry(proc_led_tempo_name, proc_dir);
 	remove_proc_entry(proc_lcm_tempo_name, proc_dir);
 	remove_proc_entry(proc_dir_name, NULL);
+	pr_debug("%s: procfs files removed\n", MODULE_NAME);
+
+	gpio_set_value(gpio_lcm_reset, 1);
+	set_current_state(TASK_INTERRUPTIBLE);
+	schedule_timeout(msecs_to_jiffies(100));
+	set_current_state(TASK_NORMAL);
+	gpio_set_value(gpio_lcm_reset, 0);
+	pr_debug("%s: LCM reset\n", MODULE_NAME);
 
 	// release GPIOs
 	gpio_free(gpio_led_blue);
 	gpio_free(gpio_led_white);
 	gpio_free(gpio_lcm_reset);
 	gpio_free(gpio_lcm_boot);
-
-	// delete timer
-	del_timer(&led_timer);
+	pr_debug("%s: GPIOs released\n", MODULE_NAME);
 
 	pr_info("%s: unload complete\n", MODULE_NAME);
 	return;
@@ -202,8 +216,8 @@ static void gpio_update_led(void)
 	uint ledval = led_pattern[led_pattern_index];
 	if (led_status != ledval) {
 		led_status = ledval;
-		gpio_set_value(gpio_led_blue, led_status & 0b01);
-		gpio_set_value(gpio_led_white, (led_status & 0b10) >> 1);
+		gpio_set_value(gpio_led_blue, (led_status & 0x1));
+		gpio_set_value(gpio_led_white, ((led_status >> 1) & 0x1));
 	}
 	if (1 < led_pattern_len) {
 		led_pattern_index = (led_pattern_index + 1) % led_pattern_len;
@@ -217,24 +231,31 @@ static void gpio_update_lcm(unsigned int new_tempo)
 {
 	if (lcm_tempo != new_tempo) {
 		lcm_tempo = new_tempo;
+		pr_debug("%s: LCM tempo updated: %d\n", MODULE_NAME, lcm_tempo);
 	}
 
 	switch (lcm_tempo) {
 	case 0:
-		gpio_set_value(gpio_lcm_boot, 1);
-		gpio_set_value(gpio_lcm_reset, 1);
+		gpio_set_value(gpio_lcm_boot, 0);
+		gpio_set_value(gpio_lcm_reset, 0);
+		pr_debug("%s: LCM power off\n", MODULE_NAME);
 		break;
 	case 1:
 		gpio_set_value(gpio_lcm_boot, 1);
-		gpio_set_value(gpio_lcm_reset, 0);
+		gpio_set_value(gpio_lcm_reset, 1);
+		pr_debug("%s: LCM power on, DFU mode\n", MODULE_NAME);
 		break;
 	case 2:
 		gpio_set_value(gpio_lcm_boot, 0);
-		gpio_set_value(gpio_lcm_reset, 0);
+		gpio_set_value(gpio_lcm_reset, 1);
+		pr_debug("%s: LCM power on, normal boot\n", MODULE_NAME);
 		break;
 	default:
-		return;
+		pr_warn("%s: LCM tempo out of range: %d\n", MODULE_NAME, lcm_tempo);
+		break;
 	};
+
+	return;
 }
 
 // LED pattern ops
