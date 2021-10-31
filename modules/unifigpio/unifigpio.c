@@ -1,295 +1,356 @@
-//  Note:
-//  This code is based on Derek Molloy's excellent tutorial on creating Linux
-//  Kernel Modules:
-//    http://derekmolloy.ie/writing-a-linux-kernel-module-part-2-a-character-device/
-
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/jiffies.h>
-#include <linux/timer.h>
-#include <linux/proc_fs.h>
+#include <linux/init.h> /* initializes the module */
+#include <linux/kernel.h> /* doing kernel things, shockingly */
+#include <linux/module.h> /* specifically, a kernel module */
+#include <linux/moduleparam.h> /* module has parameters */
+#include <linux/printk.h> /* prints info to the kernel log */
+#include <linux/errno.h> /* error codes */
+#include <linux/proc_fs.h> /* creates a procfs dir and some procfs files */
 #include <linux/fs.h>
-#include <linux/mutex.h>
-#include <linux/uaccess.h>
+#include <linux/seq_file.h> /* uses seq_file operations */
+#include <linux/uaccess.h> /* copies data to/from userspace */
+#include <linux/jiffies.h> /* wants to know what time is */
+#include <linux/timer.h> /* so it can set up a timer */
+#include <linux/gpio.h> /* do some gpio operations */
+//#include <linux/version.h> /* for version compat in future. */
+
 
 //  Define the module metadata.
 #define MODULE_NAME "unifigpio"
-#define PROC_DIR_NAME "gpio"
-#define PROC_LED_PATTERN_NAME "led_pattern"
-#define PROC_LED_TEMPO_NAME "led_tempo"
-#define PROC_LCM_TEMPO_NAME "lcm_tempo"
-#define PROC_POE_PASSTHROUGH_NAME "poe_passthrough"
-
 MODULE_AUTHOR("Andrew Powers-Holmes");
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("UniFi Security Gateway GPIO module");
+MODULE_DESCRIPTION("UniFi GPIO compat module");
 MODULE_VERSION("0.1");
 
-//  Define module parameters.
-static char *name = "Bilbo";
-module_param(name, charp, S_IRUGO);
-MODULE_PARM_DESC(name, "The name to display in /var/log/kern.log");
+// name strings
+static const char *proc_dir_name = "gpio";
+static const char *proc_led_pattern_name = "led_pattern";
+static const char *proc_led_tempo_name = "led_tempo";
+static const char *proc_lcm_tempo_name = "lcm_tempo";
+
+// LED pattern array
+#define LED_PATTERN_MAX 128
+static int led_pattern[LED_PATTERN_MAX] = { 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+					    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+					    0x30, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x22, 0x58, 0 };
+static int led_pattern_len = 1;
+module_param_array(led_pattern, int, &led_pattern_len, 0000);
+MODULE_PARM_DESC(proc_led_pattern_name, "LED pattern (array of ints)");
+
+// LED tempo number
+static int led_tempo = 120;
+module_param(led_tempo, int, 0000);
+MODULE_PARM_DESC(proc_led_tempo_name, "LED tempo (int)");
+
+// LCM tempo value, controls GPIO 27
+static int lcm_tempo = 2;
+module_param(lcm_tempo, int, 0000);
+MODULE_PARM_DESC(proc_lcm_tempo_name, "LCM tempo (int)");
+
 
 // LED timer
 static struct timer_list led_timer;
+static int led_pattern_index = 0;
+static int led_status = 0;
 
-// procfs directory struct
-static struct proc_dir_entry proc_dir;
+// pin numbers
+static const unsigned int gpio_led_blue = 29;
+static const unsigned int gpio_led_white = 28;
+static const unsigned int gpio_lcm_reset = 27;
+static const unsigned int gpio_lcm_boot = 26;
 
-// LED pattern
-static struct proc_dir_entry proc_led_pattern;
-static struct file_operations proc_led_pattern_file_fops = {
-	.open = dev_open,
-	.read = dev_read,
-	.write = dev_write,
-	.release = dev_release,
-};
+// GPIO values
+static bool led_blue = 1;
+static bool led_white = 1;
+static bool lcm_reset = 1;
+static bool lcm_boot = 0;
 
-// LED tempo
-static struct proc_dir_entry proc_led_tempo;
-static struct file_operations proc_led_tempo_file_fops = {
-	.open = dev_open,
-	.read = dev_read,
-	.write = dev_write,
-	.release = dev_release,
-};
-
-// LCM tempo
-static struct proc_dir_entry proc_lcm_tempo;
-static struct file_operations proc_lcm_tempo_file_fops = {
-	.open = dev_open,
-	.read = dev_read,
-	.write = dev_write,
-	.release = dev_release,
-};
-
-// PoE Passthrough
-static struct proc_dir_entry proc_poe_passthrough;
-static struct file_operations proc_poe_passthrough_file_fops = {
-	.open = dev_open,
-	.read = dev_read,
-	.write = dev_write,
-	.release = dev_release,
-};
+// procfs directory structs
+static struct proc_dir_entry *proc_dir;
+static struct proc_dir_entry *proc_led_pattern;
+static struct proc_dir_entry *proc_led_tempo;
+static struct proc_dir_entry *proc_lcm_tempo;
 
 
-//  The device number, automatically set. The message buffer and current message
-//  size. The number of device opens and the device class struct pointers.
-static int majorNumber;
-static char message[256] = { 0 };
-static short messageSize;
-static int numberOpens = 0;
-static struct class *unifigpioClass = NULL;
-static struct device *unifigpioDevice = NULL;
-static DEFINE_MUTEX(ioMutex);
-
-// prototypes for functions
+// prototypes for our functions later on
 static void gpio_update_led(void);
+// static void gpio_set_led(unsigned int new_val);
+static void gpio_update_lcm(unsigned int new_tempo);
 
-//  Prototypes for our device functions.
-static int dev_open(struct inode *, struct file *);
-static int dev_release(struct inode *, struct file *);
-static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
-static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
+static int led_pattern_show(struct seq_file *m, void *v);
+static int led_pattern_open(struct inode *inode, struct file *file);
+static ssize_t led_pattern_write(struct file *file, const char __user *usr_buf, size_t count, loff_t *ppos);
 
-//   Our main 'unifigpio' function...
-static char unifigpio(char input);
+static int led_tempo_show(struct seq_file *m, void *v);
+static int led_tempo_open(struct inode *inode, struct file *file);
+static ssize_t led_tempo_write(struct file *file, const char __user *usr_buf, size_t count, loff_t *ppos);
 
-//  Create the file operations instance for our driver.
-static struct file_operations fops = {
-	.open = dev_open,
-	.read = dev_read,
-	.write = dev_write,
-	.release = dev_release,
+static int lcm_tempo_show(struct seq_file *m, void *v);
+static int lcm_tempo_open(struct inode *inode, struct file *file);
+static ssize_t lcm_tempo_write(struct file *file, const char __user *usr_buf, size_t count, loff_t *ppos);
+
+
+// file operations structs
+static struct file_operations led_pattern_fops = {
+	.owner = THIS_MODULE,
+	.open = led_pattern_open,
+	.llseek = seq_lseek,
+	.read = seq_read,
+	.write = led_pattern_write,
+	.release = single_release,
 };
 
-static int __init mod_init(void)
+static struct file_operations led_tempo_fops = {
+	.owner = THIS_MODULE,
+	.open = led_tempo_open,
+	.llseek = seq_lseek,
+	.read = seq_read,
+	.write = led_tempo_write,
+	.release = single_release,
+};
+
+static struct file_operations lcm_tempo_fops = {
+	.owner = THIS_MODULE,
+	.open = lcm_tempo_open,
+	.llseek = seq_lseek,
+	.read = seq_read,
+	.write = lcm_tempo_write,
+	.release = single_release,
+};
+
+// and thus begins the actual code!
+static int __init unifigpio_init(void)
 {
-	pr_info("%s: module loaded at 0x%p\n", MODULE_NAME, mod_init);
+	pr_info("%s: init\n", MODULE_NAME);
 
-	//  Create a mutex to guard io operations.
-	mutex_init(&ioMutex);
+	// create led timer
+	setup_timer(&led_timer, gpio_update_led, 0);
+	mod_timer(&led_timer, jiffies + msecs_to_jiffies(6000 / led_tempo));
+	pr_info("%s: LED timer created", MODULE_NAME);
 
-	//  Register the device, allocating a major number.
-	majorNumber = register_chrdev(0 /* i.e. allocate a major number for me */, DEVICE_NAME, &fops);
-	if (majorNumber < 0) {
-		pr_alert("%s: failed to register a major number\n", MODULE_NAME);
-		return majorNumber;
+	// create procfs directory
+	proc_dir = proc_mkdir(proc_dir_name, NULL);
+	if (!proc_dir) {
+		pr_err("%s: failed to create /proc/%s\n", MODULE_NAME, proc_dir_name);
+		return -ENOMEM;
 	}
-	pr_info("%s: registered correctly with major number %d\n", MODULE_NAME, majorNumber);
 
-	//  Create the device class.
-	unifigpioClass = class_create(THIS_MODULE, CLASS_NAME);
-	if (IS_ERR(unifigpioClass)) {
-		//  Cleanup resources and fail.
-		unregister_chrdev(majorNumber, DEVICE_NAME);
-		pr_alert("%s: failed to register device class\n", MODULE_NAME);
-
-		//  Get the error code from the pointer.
-		return PTR_ERR(unifigpioClass);
+	proc_led_pattern = proc_create(proc_led_pattern_name, 0644, proc_dir, &led_pattern_fops);
+	if (!proc_led_pattern) {
+		pr_err("%s: failed to create /proc/%s/%s\n", MODULE_NAME, proc_dir_name,
+		       proc_led_pattern_name);
+		return -ENOMEM;
 	}
-	pr_info("%s: device class registered correctly\n", MODULE_NAME);
 
-	//  Create the device.
-	unifigpioDevice = device_create(unifigpioClass, NULL, MKDEV(majorNumber, 0), NULL, DEVICE_NAME);
-	if (IS_ERR(unifigpioDevice)) {
-		class_destroy(unifigpioClass);
-		unregister_chrdev(majorNumber, DEVICE_NAME);
-		pr_alert("%s: failed to create the device\n", DEVICE_NAME);
-		return PTR_ERR(unifigpioDevice);
+	proc_led_tempo = proc_create(proc_led_tempo_name, 0644, proc_dir, &led_tempo_fops);
+	if (!proc_led_tempo) {
+		pr_err("%s: failed to create /proc/%s/%s\n", MODULE_NAME, proc_dir_name, proc_led_tempo_name);
+		return -ENOMEM;
 	}
-	pr_info("%s: device class created correctly\n", DEVICE_NAME);
 
-	//  Success!
+	proc_lcm_tempo = proc_create(proc_lcm_tempo_name, 0644, proc_dir, &lcm_tempo_fops);
+	if (!proc_lcm_tempo) {
+		pr_err("%s: failed to create /proc/%s/%s\n", MODULE_NAME, proc_dir_name, proc_lcm_tempo_name);
+		return -ENOMEM;
+	}
+	// success!
+	pr_info("%s: procfs files created", MODULE_NAME);
+
+	// now set up the GPIOs
+	gpio_request(gpio_led_blue, "logo-blue");
+	gpio_direction_output(gpio_led_blue, led_blue);
+
+	gpio_request(gpio_led_white, "logo-white");
+	gpio_direction_output(gpio_led_white, led_white);
+
+	gpio_request(gpio_lcm_reset, "lcm-reset");
+	gpio_direction_output(gpio_lcm_reset, lcm_reset);
+
+	gpio_request(gpio_lcm_reset, "lcm-boot");
+	gpio_direction_output(gpio_lcm_boot, lcm_boot);
+
+	pr_info("%s: init complete\n", MODULE_NAME);
 	return 0;
 }
 
-static int __init init_module(void) {
-	pr_info("%s: module loaded at 0x%p\n", MODULE_NAME, init_module);
-
-	// init the LED timer
-	timer_setup(&led_timer, gpio_update_led, 0);
-	mod_timer(&led_timer, jiffies + msecs_to_jiffies(6000));
-	pr_debug("%s: LED timer created", MODULE_NAME);
-
-	// create procfs dirs
-	proc_dir = proc_mkdir(PROC_DIR_NAME, 0);
-	if (proc_dir == 0) {
-		pr_crit("%s: failed to create /proc/%s\n", MODULE_NAME, PROC_DIR_NAME);
-	} else {
-		pr_debug("%s: create /proc/%s/%s\n", PROC_DIR_NAME, PROC_LED_PATTERN_NAME);
-
-		pr_debug("%s: create /proc/%s/%s\n", PROC_DIR_NAME, PROC_LED_TEMPO_NAME);
-
-		pr_debug("%s: create /proc/%s/%s\n", PROC_DIR_NAME, PROC_LCM_TEMPO_NAME);
-
-		pr_debug("%s: create /proc/%s/%s\n", PROC_DIR_NAME, PROC_POE_PASSTHROUGH_NAME);
-	}
-
-	return 0;
-}
-
-static void __exit cleanup_module(void) {
-	pr_info("%s: unloading...\n", MODULE_NAME);
-    if (proc_dir != 0) {
-        if (proc_led_pattern != 0) {
-            remove_proc_entry("led_pattern", proc_dir);
-        }
-        if (proc_led_tempo != NULL) {
-            remove_proc_entry("led_tempo", proc_dir);
-        }
-        if (proc_poe_passthrough != 0) {
-            remove_proc_entry("poe_passthrough",proc_dir);
-        }
-    }
-    remove_proc_entry(PROC_DIR_NAME,0);
-    del_timer(led_timer);
-    return;
-}
-
-static void __exit mod_exit(void)
+// exit/cleanup func
+static void __exit unifigpio_exit(void)
 {
 	pr_info("%s: unloading...\n", MODULE_NAME);
-	device_destroy(unifigpioClass, MKDEV(majorNumber, 0));
-	class_unregister(unifigpioClass);
-	class_destroy(unifigpioClass);
-	unregister_chrdev(majorNumber, DEVICE_NAME);
-	mutex_destroy(&ioMutex);
-	pr_info("%s: device unregistered\n", MODULE_NAME);
+
+	// remove procfs directory
+	remove_proc_entry(proc_led_pattern_name, proc_dir);
+	remove_proc_entry(proc_led_tempo_name, proc_dir);
+	remove_proc_entry(proc_lcm_tempo_name, proc_dir);
+	remove_proc_entry(proc_dir_name, NULL);
+
+	// release GPIOs
+	gpio_free(gpio_led_blue);
+	gpio_free(gpio_led_white);
+	gpio_free(gpio_lcm_reset);
+	gpio_free(gpio_lcm_boot);
+
+	// delete timer
+	del_timer(&led_timer);
+
+	pr_info("%s: unload complete\n", MODULE_NAME);
+	return;
 }
 
-/** @brief The device open function that is called each time the device is opened
- *  This will only increment the numberOpens counter in this case.
- *  @param inodep A pointer to an inode object (defined in linux/fs.h)
- *  @param filep A pointer to a file object (defined in linux/fs.h)
- */
-static int dev_open(struct inode *inodep, struct file *filep)
+// LED timer callback
+static void gpio_update_led(void)
 {
-	//  Try and lock the mutex.
-	if (!mutex_trylock(&ioMutex)) {
-		pr_alert("%s: device in use by another process", MODULE_NAME);
-		return -EBUSY;
+	uint ledval = led_pattern[led_pattern_index];
+	if (led_status != ledval) {
+		led_status = ledval;
+		gpio_set_value(gpio_led_blue, led_status & 0b01);
+		gpio_set_value(gpio_led_white, (led_status & 0b10) >> 1);
+	}
+	if (1 < led_pattern_len) {
+		led_pattern_index = (led_pattern_index + 1) % led_pattern_len;
+		mod_timer(&led_timer, jiffies + msecs_to_jiffies(6000 / led_tempo));
 	}
 
-	numberOpens++;
-	pr_info("%s: device has been opened %d time(s)\n", MODULE_NAME, numberOpens);
+	return;
+}
+
+static void gpio_update_lcm(unsigned int new_tempo)
+{
+	if (lcm_tempo != new_tempo) {
+		lcm_tempo = new_tempo;
+	}
+
+	switch (lcm_tempo) {
+	case 0:
+		gpio_set_value(gpio_lcm_boot, 1);
+		gpio_set_value(gpio_lcm_reset, 1);
+		break;
+	case 1:
+		gpio_set_value(gpio_lcm_boot, 1);
+		gpio_set_value(gpio_lcm_reset, 0);
+		break;
+	case 2:
+		gpio_set_value(gpio_lcm_boot, 0);
+		gpio_set_value(gpio_lcm_reset, 0);
+		break;
+	default:
+		return;
+	};
+}
+
+// LED pattern ops
+static int led_pattern_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, led_pattern_show, NULL);
+}
+static int led_pattern_show(struct seq_file *m, void *v)
+{
+	if (led_pattern_len != 0) {
+		int i;
+		for (i = 0; i < led_pattern_len; i++) {
+			seq_printf(m, "type%d: %1d\n", i, led_pattern[i]);
+		}
+	}
+	seq_printf(m, "\n");
 	return 0;
 }
-
-/** @brief This function is called whenever device is being read from user space i.e. data is
- *  being sent from the device to the user. In this case is uses the copy_to_user() function to
- *  send the buffer string to the user and captures any errors.
- *  @param filep A pointer to a file object (defined in linux/fs.h)
- *  @param buffer The pointer to the buffer to which this function writes the data
- *  @param len The length of the b
- *  @param offset The offset if required
- */
-static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset)
+static ssize_t led_pattern_write(struct file *file, const char __user *usr_buf, size_t count, loff_t *ppos)
 {
-	int error_count = 0;
-	int i = 0;
-	char unifigpioMessage[256] = { 0 };
+	char buf[512];
+	int new_pattern[128];
+	char *pos = buf;
+	int n, idx = 0;
 
-	//   Create the unifigpio content.
-	for (; i < messageSize; i++) {
-		unifigpioMessage[i] = unifigpio(message[i]);
-	}
+	if (*ppos > 0 || count > ARRAY_SIZE(buf))
+		return -EINVAL;
 
-	// copy_to_user has the format ( * to, *from, size) and returns 0 on success
-	error_count = copy_to_user(buffer, unifigpioMessage, messageSize);
-
-	if (error_count == 0) {
-		pr_info("%s: sent %d characters to the user\n", MODULE_NAME, messageSize);
-		//    Clear the position, return 0.
-		messageSize = 0;
-		return 0;
-	} else {
-		pr_err("%s: failed to send %d characters to the user\n", MODULE_NAME, error_count);
-		//    Failed -- return a bad address message (i.e. -14)
+	if (copy_from_user(buf, usr_buf, count))
 		return -EFAULT;
+
+	// make sure our string is terminated properly
+	buf[count] = '\0';
+	pr_info("%s: received new pattern string: %s\n", MODULE_NAME, buf);
+
+	// parse the string
+
+	while (sscanf(pos, " %d%n", &new_pattern[idx], &n) == 1) {
+		pr_debug("idx=%5d val=%5d n=%5d\n", idx, new_pattern[idx], n);
+		if (idx >= ARRAY_SIZE(new_pattern))
+			break;
+		idx++;
+		pos += n;
 	}
+	pr_info("%s: parsed %d values from string\n", MODULE_NAME, idx);
+
+	// copy the new pattern to the global array
+	if (led_pattern != new_pattern) {
+		led_pattern_len = idx;
+		memcpy(led_pattern, new_pattern, sizeof(led_pattern));
+	}
+
+	// reset the pattern index and restart the animation
+	led_pattern_index = 0;
+	gpio_update_led();
+
+	return count;
 }
 
-/** @brief This function is called whenever the device is being written to from user space i.e.
- *  data is sent to the device from the user. The data is copied to the message[] array in this
- *  LKM using the sprintf() function along with the length of the string.
- *  @param filep A pointer to a file object
- *  @param buffer The buffer to that contains the string to write to the device
- *  @param len The length of the array of data that is being passed in the const char buffer
- *  @param offset The offset if required
- */
-static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset)
-{
-	//  Write the string into our message memory. Record the length.
-	copy_from_user(message, buffer, len);
-	messageSize = len;
-	pr_info("%s: received %zu characters from the user\n", MODULE_NAME, len);
-	return len;
-}
 
-/** @brief The device release function that is called whenever the device is closed/released by
- *  the userspace program
- *  @param inodep A pointer to an inode object (defined in linux/fs.h)
- *  @param filep A pointer to a file object (defined in linux/fs.h)
- */
-static int dev_release(struct inode *inodep, struct file *filep)
+// LED tempo ops
+static int led_tempo_open(struct inode *inode, struct file *file)
 {
-	mutex_unlock(&ioMutex);
-	pr_info("%s: device successfully closed\n", MODULE_NAME);
+	return single_open(file, led_tempo_show, NULL);
+}
+static int led_tempo_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d (beats per minute)\n", led_tempo);
 	return 0;
 }
-
-static char unifigpio(char input)
+static ssize_t led_tempo_write(struct file *file, const char __user *usr_buf, size_t count, loff_t *ppos)
 {
-	if ((input >= 'a' && input <= 'm') || (input >= 'A' && input <= 'M')) {
-		return input + 13;
+	int rv, val;
+
+	rv = kstrtoint_from_user(usr_buf, count, 0, &val);
+	if (rv)
+		return rv;
+
+	if (val < 0 || val > 254)
+		return -EINVAL;
+
+	if (led_tempo != val) {
+		led_tempo = val;
+		mod_timer(&led_timer, jiffies + msecs_to_jiffies(6000 / led_tempo));
 	}
-	if ((input >= 'n' && input <= 'z') || (input >= 'N' && input <= 'Z')) {
-		return input - 13;
-	}
-	return input;
+
+	return count;
 }
 
-module_init(init_module);
-module_exit(cleanup_module);
+// LCM tempo opts
+static int lcm_tempo_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, lcm_tempo_show, NULL);
+}
+
+static int lcm_tempo_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "0x%X (BIT0: BOOT, BIT1: SWNRST)\n", lcm_tempo);
+	return 0;
+}
+static ssize_t lcm_tempo_write(struct file *file, const char __user *usr_buf, size_t count, loff_t *ppos)
+{
+	int rv, val;
+
+	rv = kstrtoint_from_user(usr_buf, count, 0, &val);
+	if (rv)
+		return rv;
+
+	if (val != 0 && val != 1 && val != 2) {
+		return -EINVAL;
+	}
+
+	gpio_update_lcm(val);
+
+	return count;
+}
+
+module_init(unifigpio_init);
+module_exit(unifigpio_exit);

@@ -1,3 +1,30 @@
 {
+    "editor.formatOnSave": false,
+    "files.associations": {
+        "*.cwaps1": "powershell",
+        "*.html": "html",
+        ".clang-format": "yaml",
+        ".config": "shellscript",
+        "ssh_config": "ssh_config",
+        ".gitignore": "ignore",
+        "*.tcc": "c",
+        "fstream": "c",
+        "fs.h": "c",
+        "init.h": "c",
+        "moduleparam.h": "c",
+        "random": "cpp",
+        "uaccess.h": "c",
+        "kernel.h": "c",
+        "types.h": "c",
+        "linkage.h": "c",
+        "stdarg.h": "c",
+        "sstream": "c",
+        "cstring": "c",
+        "proc_fs.h": "c",
+        "*.def": "c",
+        "cstdio": "c"
+    },
+    "C_Cpp.default.intelliSenseMode": "linux-gcc-arm64",
     "C_Cpp.errorSquiggles": "Disabled"
+    // "C_Cpp.intelliSenseEngine": "Tag Parser"
 }
